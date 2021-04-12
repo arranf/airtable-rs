@@ -1,23 +1,23 @@
 //! # airtable
-//! 
+//!
 //! Rust wrapper for the Airtable API.  The official API's documentation can be
 //! found [here](https://airtable.com/api). This is also where you can find your API
 //! tokens. This is inspired by [Airrecord for Ruby](https://github.com/sirupsen/airrecord).
-//! 
+//!
 //! The wrapper is not complete, but has the basics and is easy to extend.
-//! 
+//!
 //! [Rustdocs](https://docs.rs/airtable/)
-//! 
+//!
 //! ### Installation
-//! 
+//!
 //! Add `airtable = "*"` to your `Cargo.toml`.
-//! 
+//!
 //! ### Example
-//! 
+//!
 //! ```
 //! extern crate dotenv;
 //! extern crate serde;
-//! 
+//!
 //! use dotenv::dotenv;
 //! use std::env;
 //! use serde::{Serialize, Deserialize};
@@ -53,7 +53,7 @@
 //!     fn set_id(&mut self, id: String) {
 //!         self.id = id;
 //!     }
-//! 
+//!
 //!     fn id(&self) -> &str {
 //!         &self.id
 //!     }
@@ -98,7 +98,7 @@
 //!
 //! println!("{:?}", base.create(&new_word));
 //! ```
-//! 
+//!
 //! License: MIT
 #![allow(dead_code)]
 extern crate failure;
@@ -109,10 +109,11 @@ extern crate serde_json;
 #[cfg(test)]
 extern crate mockito;
 
-use serde::{Serialize, Deserialize};
 use failure::Error;
+use futures;
 use reqwest::header;
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 const URL: &str = "https://api.airtable.com/v0";
@@ -228,14 +229,10 @@ where
 
         // println!("{}", url);
 
-        let mut response = self
-            .base
-            .http_client
-            .get(url.as_str())
-            .send()
-            .ok()?;
+        let response =
+            futures::executor::block_on(self.base.http_client.get(url.as_str()).send()).ok()?;
 
-        let results: RecordPage<T> = response.json().ok()?;
+        let results: RecordPage<T> = futures::executor::block_on(response.json()).ok()?;
 
         if results.offset.is_empty() {
             self.offset = None;
@@ -259,7 +256,7 @@ where
 }
 
 pub trait Record {
-    fn set_id(&mut self, String);
+    fn set_id(&mut self, error: String);
     fn id(&self) -> &str;
 }
 
@@ -350,7 +347,7 @@ where
         }
     }
 
-    pub fn create(&self, record: &T) -> Result<(), Error>
+    pub async fn create(&self, record: &T) -> Result<(), Error>
     where
         T: serde::Serialize,
     {
@@ -366,7 +363,8 @@ where
         self.http_client
             .post(&url)
             .body(json)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
         Ok(())
@@ -376,7 +374,7 @@ where
     // an update?
     //
     // TODO: Include the error body in the error.
-    pub fn update(&self, record: &T) -> Result<(), Error>
+    pub async fn update(&self, record: &T) -> Result<(), Error>
     where
         T: serde::Serialize,
     {
@@ -392,7 +390,8 @@ where
         self.http_client
             .patch(&url)
             .body(json)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
         Ok(())
