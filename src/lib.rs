@@ -1,32 +1,17 @@
 //! License: MIT
-#![allow(dead_code)]
-extern crate failure;
-extern crate reqwest;
-extern crate serde;
-extern crate serde_json;
 
-#[cfg(test)]
-extern crate mockito;
-
-use failure::Error;
-use futures;
-use reqwest::header;
-use reqwest::Url;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-const URL: &str = "https://api.airtable.com/v0";
-
 use tracing::debug;
 
+const URL: &str = "https://api.airtable.com/v0";
 #[derive(Debug)]
 pub struct Base<T: Record> {
-    http_client: reqwest::Client,
-
     table: String,
     api_key: String,
     app_key: String,
-
     phantom: PhantomData<T>,
 }
 
@@ -34,24 +19,7 @@ pub fn new<T>(api_key: &str, app_key: &str, table: &str) -> Base<T>
 where
     T: Record,
 {
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::AUTHORIZATION,
-        header::HeaderValue::from_str(&format!("Bearer {}", &api_key)).expect("invalid api key"),
-    );
-
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        header::HeaderValue::from_str("application/json").expect("invalid content type"),
-    );
-
-    let http_client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .expect("unable to create client");
-
     Base {
-        http_client,
         api_key: api_key.to_owned(),
         app_key: app_key.to_owned(),
         table: table.to_owned(),
@@ -99,21 +67,19 @@ where
             return None;
         }
 
-        let mut url = Url::parse(&format!(
-            "{}/{}/{}",
-            URL, self.base.app_key, self.base.table
-        ))
-        .unwrap();
-        url.query_pairs_mut()
-            .append_pair("offset", self.offset.as_ref().unwrap());
+        let url = &format!("{}/{}/{}", URL, self.base.app_key, self.base.table);
+        let mut req = ureq::get(&url);
+
+        if self.offset.is_some() {
+            req = req.query("offset", self.offset.as_ref().unwrap());
+        }
 
         if self.query_builder.view.is_some() {
-            url.query_pairs_mut()
-                .append_pair("view", self.query_builder.view.as_ref().unwrap());
+            req = req.query("view", self.query_builder.view.as_ref().unwrap());
         }
 
         if self.query_builder.formula.is_some() {
-            url.query_pairs_mut().append_pair(
+            req = req.query(
                 "filterByFormula",
                 self.query_builder.formula.as_ref().unwrap(),
             );
@@ -121,20 +87,19 @@ where
 
         if self.query_builder.sort.is_some() {
             for (i, ref sort) in self.query_builder.sort.as_ref().unwrap().iter().enumerate() {
-                url.query_pairs_mut()
-                    .append_pair(&format!("sort[{}][field]", i), &sort.0);
-                url.query_pairs_mut()
-                    .append_pair(&format!("sort[{}][direction]", i), &sort.1.to_string());
+                req = req.query(&format!("sort[{}][field]", i), &sort.0);
+                req = req.query(&format!("sort[{}][direction]", i), &sort.1.to_string());
             }
         }
 
-        let response = futures::executor::block_on(self.base.http_client.get(url.as_str()).send());
-        debug!("Response from get {:?}", response);
-        let response = response.ok()?;
-
-        let json = futures::executor::block_on(response.json());
-        debug!("Response JSON is ok?: {}", json.is_ok());
-        let results: RecordPage<T> = json.ok()?;
+        debug!("Blocking on get!");
+        let results: RecordPage<T> = req
+            .set("Authorization", &format!("Bearer {}", &self.base.api_key))
+            .set("Content-Type", "application/json")
+            .call()
+            .ok()?
+            .into_json()
+            .ok()?;
 
         if results.offset.is_empty() {
             self.offset = None;
@@ -179,7 +144,6 @@ impl ToString for SortDirection {
 pub struct QueryBuilder<'base, T: Record> {
     base: &'base Base<T>,
 
-    fields: Option<Vec<String>>,
     view: Option<String>,
     formula: Option<String>,
 
@@ -242,14 +206,13 @@ where
     pub fn query(&self) -> QueryBuilder<T> {
         QueryBuilder {
             base: self,
-            fields: None,
             view: None,
             formula: None,
             sort: None,
         }
     }
 
-    pub async fn create(&self, record: &T) -> Result<(), Error>
+    pub async fn create(&self, record: &T) -> Result<()>
     where
         T: serde::Serialize,
     {
@@ -262,13 +225,10 @@ where
 
         let json = serde_json::to_string(&serializing_record)?;
 
-        self.http_client
-            .post(&url)
-            .body(json)
-            .send()
-            .await?
-            .error_for_status()?;
-
+        ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", &self.api_key))
+            .set("Content-Type", "application/json")
+            .send_string(&json)?;
         Ok(())
     }
 
@@ -276,7 +236,7 @@ where
     // an update?
     //
     // TODO: Include the error body in the error.
-    pub async fn update(&self, record: &T) -> Result<(), Error>
+    pub async fn update(&self, record: &T) -> Result<()>
     where
         T: serde::Serialize,
     {
@@ -289,12 +249,10 @@ where
 
         let json = serde_json::to_string(&serializing_record)?;
 
-        self.http_client
-            .patch(&url)
-            .body(json)
-            .send()
-            .await?
-            .error_for_status()?;
+        ureq::request("PATCH", &url)
+            .set("Authorization", &format!("Bearer {}", &self.api_key))
+            .set("Content-Type", "application/json")
+            .send_string(&json)?;
 
         Ok(())
     }
